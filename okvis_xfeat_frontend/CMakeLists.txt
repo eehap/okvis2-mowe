@@ -70,3 +70,15 @@ endif()
 # Skeleton end-to-end demo (camera → frontend). No ROS.
 add_executable(xfeat_frontend_demo src/xfeat_frontend_demo.cpp)
 target_link_libraries(xfeat_frontend_demo PRIVATE okvis_xfeat_frontend)
+
+# Optional keypoint visualization (draws kpts, saves PNG / imshow). OpenCV ships
+# with JetPack; if missing the demo still builds (prints counts only).
+find_package(OpenCV QUIET COMPONENTS core imgproc imgcodecs highgui)
+if(OpenCV_FOUND)
+  target_include_directories(xfeat_frontend_demo PRIVATE ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(xfeat_frontend_demo PRIVATE ${OpenCV_LIBS})
+  target_compile_definitions(xfeat_frontend_demo PRIVATE MOWE_XFEAT_DEMO_OPENCV=1)
+  message(STATUS "okvis_xfeat_frontend: demo viz ENABLED (OpenCV ${OpenCV_VERSION})")
+else()
+  message(STATUS "okvis_xfeat_frontend: demo viz disabled (OpenCV not found)")
+endif()

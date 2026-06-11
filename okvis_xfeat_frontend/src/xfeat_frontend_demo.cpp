@@ -8,6 +8,7 @@
  *   e.g. xfeat_frontend_demo arducam_ov9281 /dev/video0 xfeat.plan
  */
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -17,10 +18,56 @@
 
 #include "okvis/xfeat/XFeatFrontend.hpp"
 
+#ifdef MOWE_XFEAT_DEMO_OPENCV
+#include <opencv2/opencv.hpp>
+
+// Draw the per-stream keypoints on their frames, concatenate L|R, and either
+// save a PNG (headless) or imshow (when $DISPLAY is set). Keypoints are in the
+// per-eye engine resolution, which equals the plane size, so they map 1:1.
+static void visualize(const mowe::camera::FrameBundle& bundle,
+                      const okvis::xfeat::FrameFeatures& feats,
+                      const std::string& out_dir) {
+  std::vector<cv::Mat> tiles;
+  const auto planes = bundle.planes();
+  for (std::size_t i = 0; i < planes.size(); ++i) {
+    const auto& p = planes[i];
+    if (!p.data) continue;
+    // Wrap the GREY plane respecting its row stride (stereo split shares one buf).
+    cv::Mat gray(p.height, p.width, CV_8UC1,
+                 const_cast<std::uint8_t*>(p.data), p.stride_bytes);
+    cv::Mat bgr;
+    cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+    if (i < feats.streams.size()) {
+      const auto& s = feats.streams[i];
+      for (const auto& kp : s.keypoints_px) {
+        cv::circle(bgr, cv::Point(int(kp.u), int(kp.v)), 1,
+                   cv::Scalar(0, 255, 0), cv::FILLED);
+      }
+      cv::putText(bgr, p.stream_id + ": " + std::to_string(s.size()) + " kpts",
+                  {10, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.8,
+                  {0, 255, 255}, 2);
+    }
+    tiles.push_back(bgr);
+  }
+  if (tiles.empty()) return;
+  cv::Mat canvas;
+  cv::hconcat(tiles, canvas);
+  if (!out_dir.empty()) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "/xfeat_%06ld.png",
+                  static_cast<long>(bundle.sequence()));
+    cv::imwrite(out_dir + name, canvas);
+  } else if (std::getenv("DISPLAY")) {
+    cv::imshow("xfeat (L|R)", canvas);
+    cv::waitKey(1);
+  }
+}
+#endif  // MOWE_XFEAT_DEMO_OPENCV
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::cerr << "usage: " << argv[0]
-              << " <camera_type> <device> [engine.plan]\n";
+              << " <camera_type> <device> [engine.plan] [viz_out_dir]\n";
     return 1;
   }
 
@@ -41,6 +88,7 @@ int main(int argc, char** argv) {
 
   okvis::xfeat::XFeatConfig fe_cfg;  // input dims auto-read from the engine
   if (argc >= 4) fe_cfg.engine_path = argv[3];
+  const std::string viz_out = (argc >= 5) ? argv[4] : "";  // PNG dir (optional)
 
   try {
     auto camera = mowe::camera::CameraFactory::create(cam_cfg);
@@ -65,6 +113,11 @@ int main(int argc, char** argv) {
         std::cout << " [" << s.stream_id << "] " << s.size() << " kpts";
       }
       std::cout << (frontend.engine_loaded() ? "" : "  (stub)") << "\n";
+#ifdef MOWE_XFEAT_DEMO_OPENCV
+      visualize(bundle, feats, viz_out);
+#else
+      (void)viz_out;
+#endif
     }
     camera->stop();
   } catch (const std::exception& e) {
