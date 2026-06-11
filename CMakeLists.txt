@@ -24,6 +24,8 @@ option (DO_TIMING
         "Enable timing" ON)
 option (BUILD_SHARED_LIBS
         "Whether to build okvis as a shared library" OFF)
+option (USE_MOWE_XFEAT
+        "Build the Mow-e XFeat feature frontend bridge (needs mowe_camera_core; CUDA+TensorRT for the real inference path)" OFF)
 
 set(OKVIS_CXX_STANDARD 17)
 set(OKVIS_PUBLIC_CXX_FLAGS)
@@ -82,6 +84,13 @@ add_subdirectory(okvis_timing)
 add_subdirectory(okvis_ceres)
 add_subdirectory(okvis_frontend)
 add_subdirectory(okvis_multisensor_processing)
+
+# Mow-e XFeat frontend bridge (camera → CUDA → TensorRT XFeat → features).
+# Opt-in: pulls in mowe_camera_core via find_package; the real inference path
+# additionally needs CUDA + TensorRT (its own USE_TENSORRT option).
+if(USE_MOWE_XFEAT)
+  add_subdirectory(okvis_xfeat_frontend)
+endif()
 
 if(BUILD_APPS)
   find_package(Boost REQUIRED COMPONENTS filesystem)
