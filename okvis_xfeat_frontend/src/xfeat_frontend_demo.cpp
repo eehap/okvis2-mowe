@@ -24,7 +24,8 @@
 // Draw the per-stream keypoints on their frames, concatenate L|R, and either
 // save a PNG (headless) or imshow (when $DISPLAY is set). Keypoints are in the
 // per-eye engine resolution, which equals the plane size, so they map 1:1.
-static void visualize(const mowe::camera::FrameBundle& bundle,
+// Returns false when the user asked to quit (q/ESC in the live window).
+static bool visualize(const mowe::camera::FrameBundle& bundle,
                       const okvis::xfeat::FrameFeatures& feats,
                       const std::string& out_dir) {
   std::vector<cv::Mat> tiles;
@@ -49,7 +50,7 @@ static void visualize(const mowe::camera::FrameBundle& bundle,
     }
     tiles.push_back(bgr);
   }
-  if (tiles.empty()) return;
+  if (tiles.empty()) return true;
   cv::Mat canvas;
   cv::hconcat(tiles, canvas);
   if (!out_dir.empty()) {
@@ -57,10 +58,11 @@ static void visualize(const mowe::camera::FrameBundle& bundle,
     std::snprintf(name, sizeof(name), "/xfeat_%06ld.png",
                   static_cast<long>(bundle.sequence()));
     cv::imwrite(out_dir + name, canvas);
-  } else if (std::getenv("DISPLAY")) {
-    cv::imshow("xfeat (L|R)", canvas);
-    cv::waitKey(1);
+    return true;
   }
+  cv::imshow("xfeat (L|R)", canvas);
+  const int key = cv::waitKey(1);     // pumps the GUI event loop; required
+  return !(key == 27 || key == 'q');  // ESC / q quits
 }
 #endif  // MOWE_XFEAT_DEMO_OPENCV
 
@@ -99,7 +101,15 @@ int main(int argc, char** argv) {
       return 2;
     }
 
-    for (int i = 0; i < 100; ++i) {
+    long max_frames = 100;  // headless / PNG-save: bounded run
+#ifdef MOWE_XFEAT_DEMO_OPENCV
+    const bool live = viz_out.empty() && std::getenv("DISPLAY") != nullptr;
+    if (live) {
+      max_frames = -1;  // live window: run until q/ESC
+      std::cout << "live view — press q or ESC in the window to quit\n";
+    }
+#endif
+    for (long i = 0; max_frames < 0 || i < max_frames; ++i) {
       mowe::camera::FrameBundle bundle;
       if (camera->capture(std::chrono::milliseconds(200), bundle) !=
           mowe::camera::CaptureStatus::Ok) {
@@ -114,7 +124,7 @@ int main(int argc, char** argv) {
       }
       std::cout << (frontend.engine_loaded() ? "" : "  (stub)") << "\n";
 #ifdef MOWE_XFEAT_DEMO_OPENCV
-      visualize(bundle, feats, viz_out);
+      if (!visualize(bundle, feats, viz_out)) break;
 #else
       (void)viz_out;
 #endif
