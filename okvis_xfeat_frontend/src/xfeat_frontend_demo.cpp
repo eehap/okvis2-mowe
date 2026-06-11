@@ -27,8 +27,19 @@ int main(int argc, char** argv) {
   mowe::camera::CameraConfig cam_cfg;
   cam_cfg.type = argv[1];
   cam_cfg.device = argv[2];
+  // OV9281 jetvariety stereo: both eyes arrive as one 2560x800 mono frame; the
+  // driver splits to left/right planes (1280x800 each) in place — matches the
+  // per-eye XFeat engine. See mowe-camera/config/ov9281_stereo.yaml (ADR-0005).
+  if (cam_cfg.type == "arducam_ov9281") {
+    cam_cfg.width = 2560;
+    cam_cfg.height = 800;
+    cam_cfg.pixel_format = "GREY";
+    cam_cfg.params["stereo"] = "true";
+    cam_cfg.params["buffer_count"] = "4";
+    cam_cfg.params["fps"] = "50.0";
+  }
 
-  okvis::xfeat::XFeatConfig fe_cfg;
+  okvis::xfeat::XFeatConfig fe_cfg;  // input dims auto-read from the engine
   if (argc >= 4) fe_cfg.engine_path = argv[3];
 
   try {
