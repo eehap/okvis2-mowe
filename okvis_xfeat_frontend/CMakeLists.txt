@@ -44,13 +44,23 @@ if(USE_TENSORRT)
   find_package(CUDAToolkit REQUIRED)
   find_library(NVINFER_LIB nvinfer REQUIRED)
 
-  # The CUDA preprocess kernel is only compiled in this configuration.
-  target_sources(okvis_xfeat_frontend PRIVATE src/preprocess.cu)
-  set_target_properties(okvis_xfeat_frontend PROPERTIES
-    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+  # The CUDA kernel lives in its own CUDA-C++17 target, deliberately NOT linking
+  # mowe_camera::core. The core exports C++20 (std::span) publicly; if the .cu
+  # were part of the main library that requirement propagates to CUDA and forces
+  # a CUDA20 dialect nvcc/CMake can't map with extensions on. The kernel needs no
+  # C++20, so isolating it keeps it at CUDA C++17 and sidesteps the clash.
+  add_library(okvis_xfeat_cuda STATIC src/preprocess.cu)
+  set_target_properties(okvis_xfeat_cuda PROPERTIES
+    CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_EXTENSIONS OFF
+    POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(okvis_xfeat_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(okvis_xfeat_cuda PRIVATE CUDA::cudart)
 
   target_link_libraries(okvis_xfeat_frontend
-    PRIVATE CUDA::cudart ${NVINFER_LIB})
+    PRIVATE okvis_xfeat_cuda CUDA::cudart ${NVINFER_LIB})
   target_compile_definitions(okvis_xfeat_frontend PRIVATE OKVIS_XFEAT_USE_TENSORRT=1)
   message(STATUS "okvis_xfeat_frontend: TensorRT inference ENABLED (sm_${CMAKE_CUDA_ARCHITECTURES})")
 else()
