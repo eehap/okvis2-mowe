@@ -88,9 +88,14 @@ struct XFeatFrontend::Impl {
     sf.keypoints_px.reserve(K);
     sf.scores.reserve(K);
     sf.descriptors.reserve(h_descriptors.size());
+    // Keypoints come out NORMALIZED to [0,1] (fp16-safe export contract, see
+    // ADR-0040); scale by the engine input dims to pixel coords in the plane.
+    const float sx = static_cast<float>(cfg.input_width);
+    const float sy = static_cast<float>(cfg.input_height);
     for (std::uint32_t i = 0; i < K; ++i) {
       if (h_scores[i] < cfg.score_threshold) continue;
-      sf.keypoints_px.push_back({h_keypoints[i * 2], h_keypoints[i * 2 + 1]});
+      sf.keypoints_px.push_back(
+          {h_keypoints[i * 2] * sx, h_keypoints[i * 2 + 1] * sy});
       sf.scores.push_back(h_scores[i]);
       const float* d = &h_descriptors[std::size_t(i) * kDescriptorDim];
       sf.descriptors.insert(sf.descriptors.end(), d, d + kDescriptorDim);

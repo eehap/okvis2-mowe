@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
       std::cout << "live view — press q or ESC in the window to quit\n";
     }
 #endif
+    bool diagged = false;  // print the coord diagnostic on the first good frame
     for (long i = 0; max_frames < 0 || i < max_frames; ++i) {
       mowe::camera::FrameBundle bundle;
       if (camera->capture(std::chrono::milliseconds(200), bundle) !=
@@ -135,7 +136,8 @@ int main(int argc, char** argv) {
       // One-shot coordinate diagnostic: where do keypoints actually land vs the
       // plane? If the bbox is tiny / off the plane size, it's a coord-space bug,
       // not a rendering one.
-      if (i == 0) {
+      if (!diagged) {
+        diagged = true;
         const auto planes = bundle.planes();
         for (std::size_t k = 0; k < feats.streams.size(); ++k) {
           const auto& s = feats.streams[k];
