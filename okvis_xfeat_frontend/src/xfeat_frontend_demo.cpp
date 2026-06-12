@@ -7,6 +7,7 @@
  * Usage: xfeat_frontend_demo <camera_type> <device> [engine.plan]
  *   e.g. xfeat_frontend_demo arducam_ov9281 /dev/video0 xfeat.plan
  */
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -41,8 +42,9 @@ static bool visualize(const mowe::camera::FrameBundle& bundle,
     if (i < feats.streams.size()) {
       const auto& s = feats.streams[i];
       for (const auto& kp : s.keypoints_px) {
-        cv::circle(bgr, cv::Point(int(kp.u), int(kp.v)), 1,
-                   cv::Scalar(0, 255, 0), cv::FILLED);
+        const cv::Point c(int(kp.u), int(kp.v));
+        cv::circle(bgr, c, 3, cv::Scalar(0, 0, 0), 2);      // dark halo
+        cv::circle(bgr, c, 2, cv::Scalar(0, 255, 0), cv::FILLED);
       }
       cv::putText(bgr, p.stream_id + ": " + std::to_string(s.size()) + " kpts",
                   {10, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.8,
@@ -129,6 +131,30 @@ int main(int argc, char** argv) {
         std::cout << " [" << s.stream_id << "] " << s.size() << " kpts";
       }
       std::cout << (frontend.engine_loaded() ? "" : "  (stub)") << "\n";
+
+      // One-shot coordinate diagnostic: where do keypoints actually land vs the
+      // plane? If the bbox is tiny / off the plane size, it's a coord-space bug,
+      // not a rendering one.
+      if (i == 0) {
+        const auto planes = bundle.planes();
+        for (std::size_t k = 0; k < feats.streams.size(); ++k) {
+          const auto& s = feats.streams[k];
+          if (s.keypoints_px.empty()) continue;
+          float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;
+          long in_bounds = 0;
+          const auto& pl = planes[k];
+          for (const auto& kp : s.keypoints_px) {
+            umin = std::min(umin, kp.u); umax = std::max(umax, kp.u);
+            vmin = std::min(vmin, kp.v); vmax = std::max(vmax, kp.v);
+            if (kp.u >= 0 && kp.u < pl.width && kp.v >= 0 && kp.v < pl.height)
+              ++in_bounds;
+          }
+          std::cout << "  [diag " << s.stream_id << "] plane "
+                    << pl.width << "x" << pl.height << "  u[" << umin << ","
+                    << umax << "] v[" << vmin << "," << vmax << "]  in-bounds "
+                    << in_bounds << "/" << s.keypoints_px.size() << "\n";
+        }
+      }
 #ifdef MOWE_XFEAT_DEMO_OPENCV
       if (!visualize(bundle, feats, viz_out)) break;
 #else
