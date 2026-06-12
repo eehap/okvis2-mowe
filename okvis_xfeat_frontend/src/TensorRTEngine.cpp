@@ -9,8 +9,8 @@
  *
  * Expects the static engine exported by ../../xfeat_lightglue_onnx_mowe/export.py:
  *   input  "images"      [1,1,H,W] float (raw 0..255, NCHW mono)
- *   output "keypoints"   [1,K,2]   float, NORMALIZED [0,1] (fp16-safe; the
- *                                  XFeatFrontend readback rescales by W,H)
+ *   output "keypoints"   [1,K,2]   INT32 pixel coords (fp16-safe; a float coord
+ *                                  output overflows the index-decode in fp16)
  *   output "descriptors" [1,K,64]  float
  *   output "scores"      [1,K]     float
  */

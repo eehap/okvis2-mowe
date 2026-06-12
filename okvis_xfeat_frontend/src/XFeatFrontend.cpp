@@ -34,7 +34,8 @@ struct XFeatFrontend::Impl {
 #ifdef OKVIS_XFEAT_USE_TENSORRT
   float* d_input = nullptr;       // engine input [1,1,H,W] float
   std::uint8_t* d_src_u8 = nullptr;  // host-upload staging (pitch == in_w)
-  std::vector<float> h_keypoints, h_scores, h_descriptors;
+  std::vector<std::int32_t> h_keypoints;  // int32 pixel coords (fp16-safe)
+  std::vector<float> h_scores, h_descriptors;
 #endif
 
   explicit Impl(const XFeatConfig& c) : cfg(c) {
@@ -76,8 +77,8 @@ struct XFeatFrontend::Impl {
     h_scores.resize(K);
     h_descriptors.resize(std::size_t(K) * kDescriptorDim);
     auto s = static_cast<cudaStream_t>(stream);
-    cudaMemcpyAsync(h_keypoints.data(), o.keypoints, K * 2 * sizeof(float),
-                    cudaMemcpyDeviceToHost, s);
+    cudaMemcpyAsync(h_keypoints.data(), o.keypoints,
+                    K * 2 * sizeof(std::int32_t), cudaMemcpyDeviceToHost, s);
     cudaMemcpyAsync(h_scores.data(), o.scores, K * sizeof(float),
                     cudaMemcpyDeviceToHost, s);
     cudaMemcpyAsync(h_descriptors.data(), o.descriptors,
@@ -88,14 +89,13 @@ struct XFeatFrontend::Impl {
     sf.keypoints_px.reserve(K);
     sf.scores.reserve(K);
     sf.descriptors.reserve(h_descriptors.size());
-    // Keypoints come out NORMALIZED to [0,1] (fp16-safe export contract, see
-    // ADR-0040); scale by the engine input dims to pixel coords in the plane.
-    const float sx = static_cast<float>(cfg.input_width);
-    const float sy = static_cast<float>(cfg.input_height);
+    // Keypoints arrive as int32 pixel coords (fp16-safe export contract, see
+    // ADR-0040); just widen to float for the POD boundary type.
     for (std::uint32_t i = 0; i < K; ++i) {
       if (h_scores[i] < cfg.score_threshold) continue;
       sf.keypoints_px.push_back(
-          {h_keypoints[i * 2] * sx, h_keypoints[i * 2 + 1] * sy});
+          {static_cast<float>(h_keypoints[i * 2]),
+           static_cast<float>(h_keypoints[i * 2 + 1])});
       sf.scores.push_back(h_scores[i]);
       const float* d = &h_descriptors[std::size_t(i) * kDescriptorDim];
       sf.descriptors.insert(sf.descriptors.end(), d, d + kDescriptorDim);
