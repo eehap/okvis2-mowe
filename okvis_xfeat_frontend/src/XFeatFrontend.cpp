@@ -67,7 +67,9 @@ struct XFeatFrontend::Impl {
   }
 
   // Read the engine outputs (on `stream`) back to host and fill `sf`, keeping
-  // only score > 0 (invalid/padding slots carry score -1, keypoint (0,0)).
+  // only keypoints whose (keypointness × reliability) score clears the
+  // detection threshold. Padding slots carry score -1; low-texture heatmap
+  // maxima carry a tiny softmax-floor score — both fall below the threshold.
   void readback(const EngineOutputs& o, StreamFeatures& sf) {
     const std::uint32_t K = o.count;
     h_keypoints.resize(K * 2);
@@ -87,7 +89,7 @@ struct XFeatFrontend::Impl {
     sf.scores.reserve(K);
     sf.descriptors.reserve(h_descriptors.size());
     for (std::uint32_t i = 0; i < K; ++i) {
-      if (h_scores[i] <= 0.f) continue;
+      if (h_scores[i] < cfg.score_threshold) continue;
       sf.keypoints_px.push_back({h_keypoints[i * 2], h_keypoints[i * 2 + 1]});
       sf.scores.push_back(h_scores[i]);
       const float* d = &h_descriptors[std::size_t(i) * kDescriptorDim];

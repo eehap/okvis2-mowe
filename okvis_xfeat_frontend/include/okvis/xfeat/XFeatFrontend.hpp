@@ -52,6 +52,13 @@ struct XFeatConfig {
   /// Fixed top-K the engine emits (static-shape export). Must match the ONNX.
   std::uint32_t max_keypoints = 4096;
 
+  /// Detection-score floor: keep a keypoint only when (keypointness ×
+  /// reliability) exceeds this. The static export pads its fixed top-K with
+  /// low-texture heatmap maxima (tiny but >0 softmax floor) — without a real
+  /// threshold those survive as a flickering noise band over blank walls/sky.
+  /// 0.05 matches XFeat's upstream `detection_threshold`. // ADR-0040.
+  float score_threshold = 0.05f;
+
   /// Run on this CUDA device.
   int cuda_device = 0;
 };

@@ -90,6 +90,12 @@ int main(int argc, char** argv) {
 
   okvis::xfeat::XFeatConfig fe_cfg;  // input dims auto-read from the engine
   if (argc >= 4) fe_cfg.engine_path = argv[3];
+  // Tune the detection floor on-device without a rebuild: raise to drop the
+  // low-texture noise band, lower for denser keypoints.
+  if (const char* th = std::getenv("MOWE_XFEAT_SCORE_THRESH")) {
+    fe_cfg.score_threshold = std::strtof(th, nullptr);
+    std::cout << "score_threshold = " << fe_cfg.score_threshold << "\n";
+  }
   const std::string viz_out = (argc >= 5) ? argv[4] : "";  // PNG dir (optional)
 
   try {
