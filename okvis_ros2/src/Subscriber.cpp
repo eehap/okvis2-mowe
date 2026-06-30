@@ -71,15 +71,24 @@ void Subscriber::setNodeHandle(std::shared_ptr<rclcpp::Node> node)
   // set up image reception
   imgTransport_.reset(new image_transport::ImageTransport(node));
 
+  // Mow-e sensor sources (mowe_camera, sch16t_imu_node) publish with
+  // rclcpp::SensorDataQoS() -> BEST_EFFORT reliability. A default (RELIABLE)
+  // subscriber is QoS-incompatible with a best-effort publisher and receives
+  // NOTHING. Subscribe best-effort so we connect to the real sensors (a
+  // best-effort sub also still accepts a reliable publisher, e.g. a rosbag).
+  rmw_qos_profile_t image_qos = rmw_qos_profile_sensor_data; // BEST_EFFORT
+  image_qos.depth = 30 * parameters_.nCameraSystem.numCameras();
+
   // set up callbacks
   for (size_t i = 0; i < parameters_.nCameraSystem.numCameras(); ++i) {
     imageSubscribers_[i] = imgTransport_->subscribe(
         "/okvis/cam" + std::to_string(i) +"/image_raw",
-        30 * parameters_.nCameraSystem.numCameras(),
+        image_qos,
         std::bind(&Subscriber::imageCallback, this, std::placeholders::_1, i));
   }
 
-  subImu_ = node_->create_subscription<sensor_msgs::msg::Imu>("/okvis/imu0", 1000, 
+  subImu_ = node_->create_subscription<sensor_msgs::msg::Imu>(
+      "/okvis/imu0", rclcpp::SensorDataQoS().keep_last(1000),
       std::bind(&Subscriber::imuCallback, this, std::placeholders::_1));
 }
 
