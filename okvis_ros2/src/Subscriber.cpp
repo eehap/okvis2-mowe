@@ -38,6 +38,7 @@
  */
  
 #include <glog/logging.h>
+#include <image_transport/create_subscription.hpp>
 #include <okvis/ros2/Subscriber.hpp>
 
 #define OKVIS_THRESHOLD_SYNC 0.01 ///< Sync threshold in seconds.
@@ -79,12 +80,18 @@ void Subscriber::setNodeHandle(std::shared_ptr<rclcpp::Node> node)
   rmw_qos_profile_t image_qos = rmw_qos_profile_sensor_data; // BEST_EFFORT
   image_qos.depth = 30 * parameters_.nCameraSystem.numCameras();
 
-  // set up callbacks
+  // set up callbacks. Use the free create_subscription() rather than
+  // ImageTransport::subscribe(): in Humble the rmw_qos_profile_t subscribe()
+  // overloads only accept a member-function POINTER, not a std::bind/Callback,
+  // so a QoS + bound callback won't compile through the member API. The free
+  // function takes a Callback AND a custom QoS.
   for (size_t i = 0; i < parameters_.nCameraSystem.numCameras(); ++i) {
-    imageSubscribers_[i] = imgTransport_->subscribe(
-        "/okvis/cam" + std::to_string(i) +"/image_raw",
-        image_qos,
-        std::bind(&Subscriber::imageCallback, this, std::placeholders::_1, i));
+    imageSubscribers_[i] = image_transport::create_subscription(
+        node_.get(),
+        "/okvis/cam" + std::to_string(i) + "/image_raw",
+        std::bind(&Subscriber::imageCallback, this, std::placeholders::_1, i),
+        "raw",
+        image_qos);
   }
 
   subImu_ = node_->create_subscription<sensor_msgs::msg::Imu>(
