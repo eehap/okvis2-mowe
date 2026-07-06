@@ -26,19 +26,19 @@
     <arg name="camera" default="true"/>  <!-- false: feed images from a rosbag -->
     <arg name="imu"    default="true"/>   <!-- false: feed IMU from a rosbag -->
 
-    <!-- ---- OV9281 stereo (split mode -> two identical-stamp Image topics) ---->
+    <!-- OV9281 stereo (split mode,  two identical-stamp Image topics) -->
     <include file="$(find-pkg-share mowe_camera)/launch/mowe_camera.launch.xml"
              if="$(var camera)">
         <arg name="config_file" value="$(var camera_config)"/>
     </include>
 
-    <!-- ---- SCH16T IMU (CLOCK_MONOTONIC stamps, same epoch as the camera) ---->
+    <!-- SCH16T IMU (CLOCK_MONOTONIC stamps, same epoch as the camera) -->
     <include file="$(find-pkg-share sch16t_imu_node)/launch/sch16t.launch.xml"
              if="$(var imu)">
         <arg name="config_file" value="$(var imu_config)"/>
     </include>
 
-    <!-- ---- OKVIS2 estimator ------------------------------------------------>
+    <!-- OKVIS2 estimator 						--> 
     <node pkg="okvis" exec="okvis_node_subscriber" name="okvis" namespace="okvis">
         <!-- >0.0 publishes IMU-propagated live state between keyframes -->
         <param name="imu_propagated_state_publishing_rate" value="200.0"/>

@@ -38,7 +38,6 @@
  */
  
 #include <glog/logging.h>
-#include <image_transport/create_subscription.hpp>
 #include <okvis/ros2/Subscriber.hpp>
 
 #define OKVIS_THRESHOLD_SYNC 0.01 ///< Sync threshold in seconds.
