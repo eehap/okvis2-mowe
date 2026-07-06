@@ -112,13 +112,26 @@ struct XFeatFrontend::Impl {
       return map_token.device_ptr();  // zero-copy
     }
     if (plane.data) {  // host upload fallback
-      cudaMemcpy2DAsync(d_src_u8, cfg.input_width, plane.data,
-                        plane.stride_bytes, cfg.input_width, cfg.input_height,
-                        cudaMemcpyHostToDevice, static_cast<cudaStream_t>(stream));
       pitch_bytes = static_cast<int>(cfg.input_width);
-      return d_src_u8;
+      return upload_host(plane.data, plane.stride_bytes);
     }
     return nullptr;
+  }
+
+  // Stage host mono8 pixels into d_src_u8 (pitch == input_width).
+  const void* upload_host(const std::uint8_t* data, std::uint32_t stride_bytes) {
+    cudaMemcpy2DAsync(d_src_u8, cfg.input_width, data, stride_bytes,
+                      cfg.input_width, cfg.input_height, cudaMemcpyHostToDevice,
+                      static_cast<cudaStream_t>(stream));
+    return d_src_u8;
+  }
+
+  // Preprocess `src` (device mono8, `pitch` bytes/row) + enqueue + readback.
+  void run(const void* src, int pitch, StreamFeatures& sf) {
+    xfeat_preprocess_mono_u8(src, pitch, d_input, cfg.input_width,
+                             cfg.input_height, stream);
+    EngineOutputs out;
+    if (engine.infer(d_input, stream, out)) readback(out, sf);
   }
 #endif  // OKVIS_XFEAT_USE_TENSORRT
 };
@@ -135,6 +148,12 @@ XFeatFrontend& XFeatFrontend::operator=(XFeatFrontend&&) noexcept = default;
 
 bool XFeatFrontend::engine_loaded() const noexcept {
   return impl_->engine.loaded();
+}
+
+void XFeatFrontend::input_dims(std::uint32_t& width,
+                               std::uint32_t& height) const noexcept {
+  width = impl_->cfg.input_width;
+  height = impl_->cfg.input_height;
 }
 
 FrameFeatures XFeatFrontend::extract(const mowe::camera::FrameBundle& bundle) {
@@ -162,13 +181,7 @@ FrameFeatures XFeatFrontend::extract(const mowe::camera::FrameBundle& bundle) {
       int pitch = 0;
       const void* src = impl_->resolve_device_input(plane, map_token, pitch);
       if (src) {
-        xfeat_preprocess_mono_u8(src, pitch, impl_->d_input,
-                                 impl_->cfg.input_width,
-                                 impl_->cfg.input_height, impl_->stream);
-        EngineOutputs out;
-        if (impl_->engine.infer(impl_->d_input, impl_->stream, out)) {
-          impl_->readback(out, sf);
-        }
+        impl_->run(src, pitch, sf);
       }
     }
 #endif  // OKVIS_XFEAT_USE_TENSORRT
@@ -176,6 +189,30 @@ FrameFeatures XFeatFrontend::extract(const mowe::camera::FrameBundle& bundle) {
     result.streams.push_back(std::move(sf));
   }
   return result;
+}
+
+StreamFeatures XFeatFrontend::extract_image(const std::uint8_t* data,
+                                            std::uint32_t stride_bytes,
+                                            std::uint32_t width,
+                                            std::uint32_t height) {
+  StreamFeatures sf;
+#ifdef OKVIS_XFEAT_USE_TENSORRT
+  if (!impl_->engine.loaded() || !data) return sf;
+  if (width != impl_->cfg.input_width || height != impl_->cfg.input_height) {
+    std::cerr << "[xfeat] image " << width << "x" << height << " != engine "
+              << impl_->cfg.input_width << "x" << impl_->cfg.input_height
+              << " — skipped (re-export the engine for this size)\n";
+    return sf;
+  }
+  impl_->run(impl_->upload_host(data, stride_bytes),
+             static_cast<int>(impl_->cfg.input_width), sf);
+#else
+  (void)data;
+  (void)stride_bytes;
+  (void)width;
+  (void)height;
+#endif  // OKVIS_XFEAT_USE_TENSORRT
+  return sf;
 }
 
 }  // namespace xfeat

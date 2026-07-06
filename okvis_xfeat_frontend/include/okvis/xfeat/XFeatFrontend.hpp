@@ -77,11 +77,22 @@ class XFeatFrontend {
   /// True when a real TensorRT engine is loaded (vs. stub mode).
   bool engine_loaded() const noexcept;
 
+  /// The static input dims of the loaded engine (0/0 in stub mode).
+  void input_dims(std::uint32_t& width, std::uint32_t& height) const noexcept;
+
   /// Run XFeat on every plane of `bundle`. On the Jetson zero-copy path each
   /// plane's NvBufSurface is mapped straight to CUDA (no host round-trip); on a
   /// host-only build it falls back to an upload (TODO). Thread-compatible: call
   /// from a single inference thread (one engine context, one stream).
   FrameFeatures extract(const mowe::camera::FrameBundle& bundle);
+
+  /// Run XFeat on a single host-resident mono8 image (the ROS-subscriber /
+  /// cv::Mat path — no FrameBundle involved). `data` points at `height` rows of
+  /// `width` pixels, `stride_bytes` apart. Dims must equal the engine's static
+  /// input dims. Same threading contract as extract().
+  StreamFeatures extract_image(const std::uint8_t* data,
+                               std::uint32_t stride_bytes,
+                               std::uint32_t width, std::uint32_t height);
 
  private:
   struct Impl;

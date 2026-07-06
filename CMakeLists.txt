@@ -82,15 +82,17 @@ add_subdirectory(okvis_cv)
 add_subdirectory(okvis_common)
 add_subdirectory(okvis_timing)
 add_subdirectory(okvis_ceres)
-add_subdirectory(okvis_frontend)
-add_subdirectory(okvis_multisensor_processing)
 
 # Mow-e XFeat frontend bridge (camera → CUDA → TensorRT XFeat → features).
 # Opt-in: pulls in mowe_camera_core via find_package; the real inference path
-# additionally needs CUDA + TensorRT (its own USE_TENSORRT option).
+# additionally needs CUDA + TensorRT (its own USE_TENSORRT option). Must come
+# BEFORE okvis_frontend, which links it (ADR-0040).
 if(USE_MOWE_XFEAT)
   add_subdirectory(okvis_xfeat_frontend)
 endif()
+
+add_subdirectory(okvis_frontend)
+add_subdirectory(okvis_multisensor_processing)
 
 if(BUILD_APPS)
   find_package(Boost REQUIRED COMPONENTS filesystem)

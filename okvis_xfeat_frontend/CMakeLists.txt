@@ -67,6 +67,25 @@ else()
   message(STATUS "okvis_xfeat_frontend: stub mode (no TensorRT) — features empty")
 endif()
 
+# When built inside the OKVIS superbuild, okvis_frontend links this library
+# PRIVATE — but okvis_frontend is STATIC, so the dependency lands in its
+# installed interface as $<LINK_ONLY:...> and these targets must join the
+# okvisTargets export set (okvisConfig.cmake.in then find_dependency()s
+# mowe_camera_core). Standalone builds skip this (no okvisTargets export).
+if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  include(GNUInstallDirs)
+  set(_xfeat_export_targets okvis_xfeat_frontend)
+  if(TARGET okvis_xfeat_cuda)
+    list(APPEND _xfeat_export_targets okvis_xfeat_cuda)
+  endif()
+  install(TARGETS ${_xfeat_export_targets} EXPORT okvisTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+  install(DIRECTORY include/okvis DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.hpp")
+endif()
+
 # Skeleton end-to-end demo (camera → frontend). No ROS.
 add_executable(xfeat_frontend_demo src/xfeat_frontend_demo.cpp)
 target_link_libraries(xfeat_frontend_demo PRIVATE okvis_xfeat_frontend)

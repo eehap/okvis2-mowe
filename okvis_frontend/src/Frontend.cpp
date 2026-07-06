@@ -77,6 +77,14 @@
 
 #include <okvis/Frontend.hpp>
 
+#include <numeric>
+
+#ifdef OKVIS_USE_MOWE_XFEAT
+// Mow-e XFeat-on-TensorRT frontend (ADR-0040): replaces BRISK detect+describe.
+#include <okvis/xfeat/XFeatFeatures.hpp>
+#include <okvis/xfeat/XFeatFrontend.hpp>
+#endif
+
 // okvis ceres
 #include <okvis/ceres/PoseParameterBlock.hpp>
 #include <okvis/ceres/HomogeneousPointParameterBlock.hpp>
@@ -175,6 +183,126 @@ Frontend::Frontend(size_t numCameras, std::string dBowVocDir)
 #endif
 }
 
+// ---- Mow-e XFeat frontend (ADR-0040) ---------------------------------------
+
+/// \brief Owns the per-camera XFeat TensorRT engines (PIMPL keeps TensorRT
+///        types out of Frontend.hpp; only populated in USE_MOWE_XFEAT builds).
+struct Frontend::XFeatRuntime {
+#ifdef OKVIS_USE_MOWE_XFEAT
+  /// One engine per camera: detectAndDescribe runs per-camera in parallel and
+  /// a TensorRT execution context + stream pair is not thread-safe.
+  std::vector<std::unique_ptr<xfeat::XFeatFrontend>> engines;
+#endif
+};
+
+void Frontend::setXFeatParameters(const XFeatParameters& xfeat) {
+  xfeatParams_ = xfeat;
+  if (!xfeat.use) {
+    xfeatRuntime_.reset();
+    return;
+  }
+#ifdef OKVIS_USE_MOWE_XFEAT
+  std::unique_ptr<XFeatRuntime> runtime(new XFeatRuntime());
+  for (size_t i = 0; i < numCameras_; ++i) {
+    xfeat::XFeatConfig cfg;
+    cfg.engine_path = xfeat.engine;
+    cfg.score_threshold = float(xfeat.score_threshold);
+    runtime->engines.emplace_back(new xfeat::XFeatFrontend(cfg));
+    OKVIS_ASSERT_TRUE(Exception, runtime->engines.back()->engine_loaded(),
+                      "XFeat engine failed to load (TensorRT build + .plan "
+                      "required): " << xfeat.engine)
+  }
+  std::uint32_t w = 0, h = 0;
+  runtime->engines.front()->input_dims(w, h);
+  xfeatRuntime_ = std::move(runtime);
+  LOG(INFO) << "XFeat frontend enabled: " << xfeat.engine << " (" << w << "x"
+            << h << "); matching_threshold " << briskMatchingThreshold_
+            << " interpreted as cosine distance";
+#else
+  OKVIS_THROW(Exception,
+              "frontend_parameters: xfeat: use=true, but okvis was built "
+              "without USE_MOWE_XFEAT")
+#endif
+}
+
+bool Frontend::usingXFeat() const {
+  return xfeatParams_.use && xfeatRuntime_ != nullptr;
+}
+
+// XFeat descriptors are 64-D float (okvis::xfeat::kDescriptorDim); constant
+// kept local so non-USE_MOWE_XFEAT builds compile the dispatch below too.
+static constexpr int kXFeatDescriptorDim = 64;
+
+size_t Frontend::descriptorBytes() const {
+  return usingXFeat() ? sizeof(float) * kXFeatDescriptorDim : 48u;
+}
+
+double Frontend::descriptorDist(const unsigned char* a,
+                                const unsigned char* b) const {
+  if (!usingXFeat()) {
+    return double(brisk::Hamming::PopcntofXORed(a, b, 3));  // 3 x 128 bit.
+  }
+  // XFeat: L2-normalised float descriptors -> cosine distance 1 - <a,b>, range
+  // [0, 2]. matching_threshold is interpreted on this scale (ADR-0040).
+  const Eigen::Map<const Eigen::Matrix<float, kXFeatDescriptorDim, 1>> fa(
+      reinterpret_cast<const float*>(a));
+  const Eigen::Map<const Eigen::Matrix<float, kXFeatDescriptorDim, 1>> fb(
+      reinterpret_cast<const float*>(b));
+  return 1.0 - double(fa.dot(fb));
+}
+
+bool Frontend::detectAndDescribeXFeat(
+    size_t cameraIndex, std::shared_ptr<okvis::MultiFrame> frameOut) {
+#ifdef OKVIS_USE_MOWE_XFEAT
+  xfeat::XFeatFrontend& engine = *xfeatRuntime_->engines.at(cameraIndex);
+  const cv::Mat image = frameOut->image(cameraIndex);
+  OKVIS_ASSERT_TRUE(Exception, image.type() == CV_8UC1,
+                    "XFeat frontend expects mono8 images")
+  xfeat::StreamFeatures features =
+      engine.extract_image(image.data, std::uint32_t(image.step),
+                           std::uint32_t(image.cols), std::uint32_t(image.rows));
+
+  // Keep only the strongest max_num_keypoints, like the BRISK detector does.
+  std::vector<size_t> order(features.size());
+  std::iota(order.begin(), order.end(), size_t(0));
+  const size_t numKeypoints =
+      std::min(features.size(), briskDetectionMaximumKeypoints_);
+  if (numKeypoints < features.size()) {
+    std::partial_sort(order.begin(), order.begin() + numKeypoints, order.end(),
+                      [&features](size_t a, size_t b) {
+                        return features.scores[a] > features.scores[b];
+                      });
+  }
+
+  std::vector<cv::KeyPoint> keypoints;
+  keypoints.reserve(numKeypoints);
+  cv::Mat descriptors(int(numKeypoints), kXFeatDescriptorDim, CV_32FC1);
+  for (size_t n = 0; n < numKeypoints; ++n) {
+    const size_t i = order[n];
+    // XFeat has no scale; keypoint_size sets the observation uncertainty
+    // (sigma = size/focalLength * 0.125 in the matching stages).
+    keypoints.emplace_back(features.keypoints_px[i].u,
+                           features.keypoints_px[i].v,
+                           float(xfeatParams_.keypoint_size), -1.f,
+                           features.scores[i]);
+    std::memcpy(descriptors.ptr<float>(int(n)),
+                &features.descriptors[i * xfeat::kDescriptorDim],
+                sizeof(float) * xfeat::kDescriptorDim);
+  }
+  frameOut->resetKeypoints(cameraIndex, keypoints);
+  frameOut->resetDescriptors(cameraIndex, descriptors);
+  frameOut->computeBackProjections(cameraIndex);
+  return true;
+#else
+  (void)cameraIndex;
+  (void)frameOut;
+  OKVIS_THROW(Exception, "not built with USE_MOWE_XFEAT")
+  return false;
+#endif
+}
+
+// -----------------------------------------------------------------------------
+
 Frontend::~Frontend() {
   endCnnThreads();
 }
@@ -184,6 +312,11 @@ bool Frontend::loadComponent(std::string filename,
                              const cameras::NCameraSystem &nCameraSystem,
                              bool componentFixed)
 {
+  OKVIS_ASSERT_TRUE(Exception, !usingXFeat(),
+                    "loadComponent: saved components store BRISK descriptors "
+                    "and a BRISK DBoW vocabulary; not usable with the XFeat "
+                    "frontend (ADR-0040)")
+
   // create component
   components_.emplace_back(Component(imuParameters, nCameraSystem));
   componentsFixed_.push_back(componentFixed);
@@ -229,6 +362,13 @@ bool Frontend::detectAndDescribe(size_t cameraIndex, std::shared_ptr<okvis::Mult
 
   // check there are no keypoints here
   OKVIS_ASSERT_TRUE(Exception, keypoints == nullptr, "external keypoints currently not supported")
+
+  if (usingXFeat()) {
+    // ADR-0040: XFeat replaces BRISK detect+describe entirely. Branch out
+    // before the BRISK-only camera-awareness / extraction-direction setup
+    // below (T_WC gravity alignment is a BRISK descriptor concern).
+    return detectAndDescribeXFeat(cameraIndex, frameOut);
+  }
 
   // hack: also initialise those maps for camera-aware extraction
   for (size_t i = 0; i < numCameras_; ++i) {
@@ -336,11 +476,12 @@ bool Frontend::verifyRecognisedPlace(const Estimator &estimator,
       }
       const uchar *ddata = framesInOut->keypointDescriptor(im, 0);
       const size_t K = framesInOut->numKeypoints(im);
-      uint32_t distMin = briskMatchingThreshold_;
+      const size_t descBytes = descriptorBytes();
+      double distMin = briskMatchingThreshold_;
       size_t kMin = 0;
       for (const unsigned char* oldDescripor : descriptors.at(iter->first)) {
         for (size_t k = 0; k < K; ++k) {
-          const uint32_t dist = brisk::Hamming::PopcntofXORed(ddata + 48 * k, oldDescripor, 3);
+          const double dist = descriptorDist(ddata + descBytes * k, oldDescripor);
           if (dist < distMin) {
             distMin = dist;
             kMin = k;
@@ -400,7 +541,9 @@ bool Frontend::verifyRecognisedPlace(const Estimator &estimator,
     inliers.at(size_t(ransac.inliers_.at(i))) = true;
   }
 
-  // check distinciveness of survived matches
+  // check distinciveness of survived matches (BRISK bit statistics — skipped
+  // with float descriptors; unreachable there anyway, the DBoW paths are off)
+  if (!usingXFeat()) {
   float sum = 0.0;
   for (size_t im = 0; im < numCameras_; ++im) {
     Eigen::Matrix<float, Eigen::Dynamic, 48 * 8> descriptorMatrix(ransac.inliers_.size(), 48 * 8);
@@ -442,6 +585,7 @@ bool Frontend::verifyRecognisedPlace(const Estimator &estimator,
     LOG(INFO) << framesInOut->id() << "->" << oldFrame->id() << " : "
               << "Rejecting loop closure due to indistincive descriptors (" << avg << ")";
     return false;
+  }
   }
 
   // refine
@@ -787,22 +931,28 @@ bool Frontend::dataAssociationAndInitialization(
     *asKeyframe = true;  // first frame needs to be keyframe
   }
 
-  // prepare features for place recognition
-  std::vector<std::vector<uchar>> features(framesInOut->numKeypoints());
-  // first, we are trying to match the database for loop closures
-  int offset = 0;
-  for (size_t im = 0; im < numCameras_; ++im) {
-    for (size_t k = 0; k < framesInOut->numKeypoints(im); ++k) {
-      features.at(k + offset).resize(48); // TODO: get 48 from feature
-      memcpy(features.at(k + offset).data(),
-             framesInOut->keypointDescriptor(im, k),
-             48 * sizeof(uchar));
+  // prepare features for place recognition. BRISK only: the DBoW vocabulary is
+  // BRISK-trained and unusable with XFeat float descriptors — with the XFeat
+  // frontend all DBoW paths (multi-session + loop closure) stay off (ADR-0040;
+  // DINOv2/FAISS place recognition is the planned replacement).
+  std::vector<std::vector<uchar>> features;
+  if (!usingXFeat()) {
+    features.resize(framesInOut->numKeypoints());
+    // first, we are trying to match the database for loop closures
+    int offset = 0;
+    for (size_t im = 0; im < numCameras_; ++im) {
+      for (size_t k = 0; k < framesInOut->numKeypoints(im); ++k) {
+        features.at(k + offset).resize(48); // TODO: get 48 from feature
+        memcpy(features.at(k + offset).data(),
+               framesInOut->keypointDescriptor(im, k),
+               48 * sizeof(uchar));
+      }
+      offset += framesInOut->numKeypoints(im);
     }
-    offset += framesInOut->numKeypoints(im);
   }
 
   /*MULTI-SESSION AND MULTI-AGENT*/
-  if (!estimator.isLoopClosing() && !estimator.isLoopClosureAvailable()
+  if (!usingXFeat() && !estimator.isLoopClosing() && !estimator.isLoopClosureAvailable()
       && !estimator.needsFullGraphOptimisation() && isInitialized_) {
     for (uint64_t c = 0; c < componentDBows_.size(); ++c) {
       TimerSwitchable matchDBoWTimer0("2.3.0 multi-session and multi-agent place recognition");
@@ -847,7 +997,7 @@ bool Frontend::dataAssociationAndInitialization(
   }
 
   /*LOOP CLOSURES*/
-  if(params.estimator.do_loop_closures && !estimator.isLoopClosing()
+  if(!usingXFeat() && params.estimator.do_loop_closures && !estimator.isLoopClosing()
       && !estimator.isLoopClosureAvailable()
       && !estimator.needsFullGraphOptimisation() && isInitialized_) {
 
@@ -1312,8 +1462,11 @@ int Frontend::matchToMap(Estimator &estimator, const okvis::ViParameters& params
 
     // go through all landmarks
     const size_t numDescriptorsToKeep = 3; // use only best 3
+    // Descriptor rows are raw bytes: 48 for BRISK, 256 for XFeat 64-D float
+    // (the distance dispatch in descriptorDist() reinterprets accordingly).
+    const int descBytes = int(descriptorBytes());
     descriptorPool[im] = cv::Mat(
-        int(numDescriptorsToKeep)*pointMap.size(), 48, CV_8UC1);
+        int(numDescriptorsToKeep)*pointMap.size(), descBytes, CV_8UC1);
     uchar* dataPtr = descriptorPool[im].data;
     for(MapPoints::const_iterator it = pointMap.begin(); it != pointMap.end(); ++it) {
       if(loopClosureLandmarksToUseExclusively) {
@@ -1358,7 +1511,7 @@ int Frontend::matchToMap(Estimator &estimator, const okvis::ViParameters& params
       // obtain map point descriptor, and do some pruning.
       std::vector<double> bestScores(numDescriptorsToKeep, 1.0);
       landmarkToMatch.descriptors = cv::Mat(
-          int(numDescriptorsToKeep), 48, CV_8UC1, dataPtr);
+          int(numDescriptorsToKeep), descBytes, CV_8UC1, dataPtr);
       landmarkToMatch.e_W.resize(3,numDescriptorsToKeep);
       landmarkToMatch.r_W.resize(3,numDescriptorsToKeep);
       landmarkToMatch.kids.reserve(numDescriptorsToKeep);
@@ -1417,9 +1570,9 @@ int Frontend::matchToMap(Estimator &estimator, const okvis::ViParameters& params
           const MultiFramePtr oldFrame =
               estimator.multiFrame(StateId(kid.frameId));
           std::memcpy(
-              landmarkToMatch.descriptors.data+48*worstIdx,
+              landmarkToMatch.descriptors.data+size_t(descBytes)*worstIdx,
               oldFrame->keypointDescriptor(
-                  kid.cameraIndex, kid.keypointIndex), 48);
+                  kid.cameraIndex, kid.keypointIndex), size_t(descBytes));
 
           // remember some other stuff for efficiency
           Eigen::Vector3d e_C;
@@ -1437,10 +1590,11 @@ int Frontend::matchToMap(Estimator &estimator, const okvis::ViParameters& params
 
       // crop unused bottom rows / right cols
       //then here he can shorten the number of descriptros
-      landmarkToMatch.descriptors = landmarkToMatch.descriptors(cv::Rect(0, 0, 48, o + 1));
+      landmarkToMatch.descriptors =
+          landmarkToMatch.descriptors(cv::Rect(0, 0, descBytes, o + 1));
       landmarkToMatch.e_W.conservativeResize(3,o + 1);
       landmarkToMatch.r_W.conservativeResize(3,o + 1);
-      dataPtr += (o + 1) *48;
+      dataPtr += (o + 1) * size_t(descBytes);
 
       if(landmarkToMatch.descriptors.rows==0) {
         // no observations -- weird.
@@ -1722,6 +1876,7 @@ void Frontend::matchToMapByThread(
   const size_t startK = segment*threadIdx;
   const size_t endK = threadIdx+1 == numThreads ? numKeypoints : startK + segment;
   const uchar* ddata = multiFrame->keypointDescriptor(im, 0);
+  const size_t descBytes = descriptorBytes();
   Eigen::Matrix2Xd keypoints(2,numKeypoints);
   std::vector<bool> use(numKeypoints, true);
   for(size_t k = startK; k < endK; k++) {
@@ -1760,11 +1915,11 @@ void Frontend::matchToMapByThread(
         continue;
       }
 
-      const uchar* descriptorK = ddata + k*48;
+      const uchar* descriptorK = ddata + k*descBytes;
       for(int d = 0; d<it->second.descriptors.rows; ++d) {
-        const double dist = brisk::Hamming::PopcntofXORed(
+        const double dist = descriptorDist(
             descriptorK,
-            it->second.descriptors.data + d*48, 3);
+            it->second.descriptors.data + d*descBytes);
         if(dist < distances[k]) {
           distances[k] = dist;
           lmIds[k] = it->first;
@@ -1805,6 +1960,7 @@ void Frontend::matchToMapByThreadUnitialised(
   const size_t startK = segment*threadIdx;
   const size_t endK = threadIdx+1 == numThreads ? numKeypoints : startK + segment;
   const uchar* ddata = multiFrame->keypointDescriptor(im, 0);
+  const size_t descBytes = descriptorBytes();
   Eigen::Matrix3Xd e_Ws(3,numKeypoints);
   std::vector<uint64_t> previousIds(numKeypoints,0);
   std::vector<bool> use(numKeypoints,false);
@@ -1844,10 +2000,10 @@ void Frontend::matchToMapByThreadUnitialised(
 
       // also check epipolar distance (later)
       const Eigen::Vector3d e1_W=e_Ws.col(k);
-      const uchar* descriptorK = ddata + k*48;
+      const uchar* descriptorK = ddata + k*descBytes;
       for(int d = 0; d<it->second.descriptors.rows; ++d) {
-        const double dist = brisk::Hamming::PopcntofXORed(
-            descriptorK, it->second.descriptors.data + d*48, 3);
+        const double dist = descriptorDist(
+            descriptorK, it->second.descriptors.data + d*descBytes);
 
         if(dist < distances[k]) {
 
@@ -1973,20 +2129,21 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
       const double f0 = 0.5* (camera->focalLengthU() + camera->focalLengthV());
 
       // preprocess matchable set, get descriptors close in memory
+      const size_t descBytes = descriptorBytes();
       std::vector<size_t> k1s;
       k1s.reserve(k1Size);
-      cv::Mat desc1(k1Size, 48, CV_8UC1);
+      cv::Mat desc1(int(k1Size), int(descBytes), CV_8UC1);
       for(size_t k1 = 0; k1 < k1Size; ++k1) {
         const uint64_t id1 = multiFrame1->landmarkId(im, k1);
         if(id1) {
           continue; // already matched
         }
         std::memcpy(
-            desc1.data+48*k1s.size(),
-            multiFrame1->keypointDescriptor(im, k1), 48);
+            desc1.data+descBytes*k1s.size(),
+            multiFrame1->keypointDescriptor(im, k1), descBytes);
         k1s.push_back(k1);
       }
-      desc1 = desc1(cv::Rect(0,0,48,k1s.size()));
+      desc1 = desc1(cv::Rect(0,0,int(descBytes),k1s.size()));
 
       AlignedVector<MatchInfo> matchInfos(k0Size);
 
@@ -1995,7 +2152,7 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
       for (size_t t = 0; t < size_t(params.frontend.num_matching_threads); t++) {
         workers.push_back(std::thread([this, t, k0Size, im, &multiFrame0, &estimator, f0, k1s,
                                       &T_WC0, &T_WC1, &multiFrame1, &olderFrameId, &matchInfos,
-                                       &params, &camera, desc1]() {
+                                       &params, &camera, desc1, descBytes]() {
           for(size_t k0 = t; k0 < k0Size; k0 += size_t(params.frontend.num_matching_threads)) {
             uint64_t id0 = multiFrame0->landmarkId(im, k0);
             if(id0) {
@@ -2007,7 +2164,7 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
               }
             }
 
-            uint32_t distances = briskMatchingThreshold_;
+            double distances = briskMatchingThreshold_;
             bool initialisable = false;
             double quality = 0.0;
             Eigen::Vector4d hps_W(0,0,0,0);
@@ -2030,8 +2187,7 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
 
             for(size_t kk = 0; kk < k1s.size(); ++kk) {
               const size_t k1 = k1s[kk];
-              const uint32_t dist = brisk::Hamming::PopcntofXORed(
-                  d0, desc1.data+kk*48, 3);
+              const double dist = descriptorDist(d0, desc1.data+kk*descBytes);
               if(dist < distances) {
                 // it's a match!
 
@@ -2206,9 +2362,9 @@ void Frontend::matchStereo(Estimator &estimator, std::shared_ptr<okvis::MultiFra
           size_t k1_match = 0;
 
           for(size_t k1 = 0; k1 < k1Size; ++k1) {
-            const auto dist = brisk::Hamming::PopcntofXORed(
+            const double dist = descriptorDist(
                 multiFrame->keypointDescriptor(im0, k0),
-                  multiFrame->keypointDescriptor(im1, k1), 3);
+                  multiFrame->keypointDescriptor(im1, k1));
             if(dist < distances) {
               // it's a match!
               double size0, size1;

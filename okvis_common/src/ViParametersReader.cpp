@@ -249,6 +249,26 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
   parseEntry(file["frontend_parameters"], "num_matching_threads",
              viParameters_.frontend.num_matching_threads);
 
+  // Optional XFeat/LighterGlue frontend block (Mow-e, ADR-0040). Absent block
+  // == BRISK frontend; inside the block only the engine paths are optional.
+  const cv::FileNode xfeatNode = file["frontend_parameters"]["xfeat"];
+  if (!xfeatNode.empty()) {
+    XFeatParameters& xfeat = viParameters_.frontend.xfeat;
+    parseEntry(xfeatNode, "use", xfeat.use);
+    if (xfeatNode["engine"].isString()) {
+      xfeat.engine = std::string(xfeatNode["engine"]);
+    }
+    if (xfeatNode["lighterglue_engine"].isString()) {
+      xfeat.lighterglue_engine = std::string(xfeatNode["lighterglue_engine"]);
+    }
+    parseEntry(xfeatNode, "score_threshold", xfeat.score_threshold);
+    parseEntry(xfeatNode, "keypoint_size", xfeat.keypoint_size);
+    parseEntry(xfeatNode, "match_score_min", xfeat.match_score_min);
+    parseEntry(xfeatNode, "motion_stereo_top_n", xfeat.motion_stereo_top_n);
+    OKVIS_ASSERT_TRUE(Exception, !xfeat.use || !xfeat.engine.empty(),
+                      "frontend_parameters: xfeat: use requires an engine path")
+  }
+
   // Parameters regarding the estimator.
   parseEntry(file["estimator_parameters"], "num_keyframes",
              viParameters_.estimator.num_keyframes);
