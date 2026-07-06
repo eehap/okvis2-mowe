@@ -46,30 +46,36 @@ CMake package, so OKVIS finds it without ROS).
 | Piece | State |
 |---|---|
 | `FrameBundle` → frontend plumbing, engine ownership, per-plane loop | ✅ real, compiles + runs |
+| Host-image entry point (`extract_image`, the ROS-subscriber path) | ✅ used by `okvis::Frontend` |
 | `mowe_camera::core` link + driver self-registration across the `.so` | ✅ verified on dev box |
 | Zero-copy `NvBufSurface → EGL → CUDA` mapping (`gpu_map.cpp`) | ⚠️ written, **needs on-device verification** (JetPack 6.2 headers) |
-| CUDA preprocess kernel (`preprocess.cu`, mono u8 → raw-0..255 NCHW float) | ⚠️ written, needs on-device build |
-| TensorRT 10 binding introspection + `enqueueV3` (`TensorRTEngine.cpp`) | ⚠️ written, needs on-device build (verify TRT 10.3 API) |
-| Device→host readback into `FrameFeatures` (score>0 filter) | ⚠️ written |
-| `.plan` engine from `trtexec` | ❌ on-device step (see below) |
-| OKVIS `MultiFrame` hand-off | ❌ next workstream (see below) |
+| CUDA preprocess kernel (`preprocess.cu`, mono u8 → raw-0..255 NCHW float) | ✅ on-device (demo) |
+| TensorRT 10 binding introspection + `enqueueV3` (`TensorRTEngine.cpp`) | ✅ on-device (demo, TRT 10.3) |
+| Device→host readback into `FrameFeatures` (score threshold filter) | ✅ |
+| `.plan` engines from `trtexec` (`xfeat.plan`, `lighterglue.plan`) | ✅ on device (`/opt/mowe/onnx`) |
+| OKVIS `MultiFrame` hand-off (detect/describe + float matching) | ✅ ADR-0040 stage A (`okvis_frontend`, `USE_MOWE_XFEAT`) |
+| **LighterGlue** pair matcher (`LighterGlueMatcher`, DDS outputs) | ✅ stage B/C — stereo + top-overlap motion stereo |
+| Place recognition (DBoW replacement) | ❌ ADR-0040 issue #5 (DINOv2/FAISS); loop closures disabled with XFeat |
 
 Without `USE_TENSORRT` the engine runs in **stub mode**: the pipeline executes
 end-to-end but emits empty features (useful for wiring/timing the capture path).
 
-## The OKVIS hand-off (next workstream)
+## The OKVIS hand-off (ADR-0040 stage A–C, done)
 
-`FrameFeatures` carries **float** 64-D descriptors (cosine/L2 matching), not
-binary BRISK (Hamming). Feeding OKVIS therefore requires the float-descriptor
-matching path, not the BRISK one. The three mismatches to resolve when wiring
-`FrameFeatures` → `okvis::MultiFrame`:
+`okvis::Frontend` (built with `USE_MOWE_XFEAT`, enabled via
+`frontend_parameters.xfeat` in the OKVIS yaml — see
+`config/ov9281_sch16t_xfeat.yaml`):
 
-1. **Descriptor type/metric** — widen OKVIS keypoint/descriptor storage to float;
-   replace Hamming scoring with L2/cosine.
-2. **Matcher** — either reuse OKVIS's IMU-guided matching with the new metric, or
-   bolt on **LighterGlue** (exported separately; see `../../xfeat_lightglue_onnx`).
-3. **Place recognition** — OKVIS's DBoW2 vocabulary is BRISK-trained and unusable
-   with XFeat descriptors; needs a new vocabulary or a different VPR path.
-
-These are deliberately **out of scope** for this skeleton and warrant an ADR
-(`docs/adr/`) per the repo's "new SLAM frontend / structural choice" rule.
+1. **Detect/describe** — `detectAndDescribeXFeat` runs one engine per camera
+   (TRT contexts are not thread-safe) and stores keypoints + CV_32F 64-D
+   descriptors via `resetKeypoints`/`resetDescriptors`.
+2. **Metric** — `descriptorDist()` dispatches BRISK Hamming ↔ cosine distance
+   (1 − dot); `matching_threshold` is a cosine distance with XFeat.
+3. **Pair matching** — `LighterGlueMatcher` proposes mutual-NN pairs for
+   `matchStereo` (L↔R) and the top-`motion_stereo_top_n` overlap frames in
+   `matchMotionStereo`; OKVIS's triangulation validation + landmark
+   bookkeeping run unchanged on the proposals. Empty `lighterglue_engine`
+   falls back to brute-force cosine NN.
+4. **Place recognition** — still open (issue #5): the DBoW2 vocabulary is
+   BRISK-trained, so multi-session + loop-closure paths are disabled under
+   XFeat until DINOv2/FAISS lands.

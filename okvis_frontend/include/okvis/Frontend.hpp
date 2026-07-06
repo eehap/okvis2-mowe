@@ -332,6 +332,14 @@ private:
   /// \brief Bytes per keypoint descriptor: 48 (BRISK) or 256 (XFeat 64 float).
   size_t descriptorBytes() const;
 
+  /// \brief LighterGlue pair proposals between (frameA, imA) and (frameB,
+  ///        imB): fills matchBForA[kA] = matched kB or -1. Returns false when
+  ///        LighterGlue is unavailable — caller falls back to brute-force
+  ///        descriptor distance. (ADR-0040 stage B.)
+  bool lighterGluePairProposals(const okvis::MultiFrame& frameA, size_t imA,
+                                const okvis::MultiFrame& frameB, size_t imB,
+                                std::vector<int>& matchBForA);
+
   /// \brief Descriptor distance dispatch: BRISK Hamming popcount, or cosine
   ///        distance (1 - dot, unit descriptors) when the XFeat frontend is
   ///        active. matching_threshold is interpreted on the active scale.

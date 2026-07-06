@@ -136,10 +136,23 @@ are off (placeholders) or the scene is texture-poor — fix intrinsics first.
 - The trajectory is the right **shape**; correct **scale** waits on real
   intrinsics + a measured baseline.
 
-## Next branch — XFeat + LighterGlue frontend swap
+## XFeat + LighterGlue frontend (ADR-0040 stage A–C)
 
-Once the pose loop is solid, swap BRISK for the XFeat-on-TensorRT frontend
-(ADR-0040). That is **not** a config change — `ThreadedSlam` runs
-`Frontend::detectAndDescribe` (BRISK) internally; the swap means float-descriptor
-`MultiFrame` storage, L2/cosine matching (or LighterGlue), and a non-BRISK VPR.
-Tracked as ADR-0040 issues #4–6.
+The learned frontend is in: build with `-DUSE_MOWE_XFEAT=ON -DUSE_TENSORRT=ON`
+(plus `-Dmowe_camera_core_DIR=<prefix>/lib/cmake/mowe_camera_core`) and run
+with the xfeat config:
+
+```bash
+colcon build --packages-select okvis --cmake-args -DUSE_MOWE_XFEAT=ON \
+  -DUSE_TENSORRT=ON -Dmowe_camera_core_DIR=$HOME/mowe-prefix/lib/cmake/mowe_camera_core
+ros2 launch okvis okvis_mowe_ov9281.launch.xml \
+  config_filename:=$(ros2 pkg prefix okvis)/share/okvis/config/ov9281_sch16t_xfeat.yaml
+```
+
+`frontend_parameters.xfeat` selects the frontend at runtime: XFeat replaces
+BRISK detect/describe (per-camera TensorRT engines), descriptor matching runs
+on cosine distance (`matching_threshold` changes meaning — see the yaml), and
+LighterGlue proposes the stereo / top-overlap motion-stereo pairs. Loop
+closures are **off** under XFeat (BRISK DBoW vocabulary; DINOv2/FAISS is
+ADR-0040 issue #5). The BRISK path stays fully intact for A/B via the
+original `ov9281_sch16t.yaml`.

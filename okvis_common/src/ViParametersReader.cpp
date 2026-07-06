@@ -255,11 +255,17 @@ void ViParametersReader::readConfigFile(const std::string& filename) {
   if (!xfeatNode.empty()) {
     XFeatParameters& xfeat = viParameters_.frontend.xfeat;
     parseEntry(xfeatNode, "use", xfeat.use);
+    // cv::FileStorage keeps trailing "# ..." comments inside string scalars
+    // (same quirk the bool parseEntry works around) — cut at whitespace.
+    const auto readPath = [](const cv::FileNode& node) {
+      std::string s = std::string(node);
+      return s.substr(0, s.find_first_of(" \t"));
+    };
     if (xfeatNode["engine"].isString()) {
-      xfeat.engine = std::string(xfeatNode["engine"]);
+      xfeat.engine = readPath(xfeatNode["engine"]);
     }
     if (xfeatNode["lighterglue_engine"].isString()) {
-      xfeat.lighterglue_engine = std::string(xfeatNode["lighterglue_engine"]);
+      xfeat.lighterglue_engine = readPath(xfeatNode["lighterglue_engine"]);
     }
     parseEntry(xfeatNode, "score_threshold", xfeat.score_threshold);
     parseEntry(xfeatNode, "keypoint_size", xfeat.keypoint_size);

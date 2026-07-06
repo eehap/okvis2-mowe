@@ -80,7 +80,9 @@
 #include <numeric>
 
 #ifdef OKVIS_USE_MOWE_XFEAT
-// Mow-e XFeat-on-TensorRT frontend (ADR-0040): replaces BRISK detect+describe.
+// Mow-e XFeat-on-TensorRT frontend (ADR-0040): replaces BRISK detect+describe;
+// LighterGlue replaces brute-force pair matching (stereo / motion stereo).
+#include <okvis/xfeat/LighterGlueMatcher.hpp>
 #include <okvis/xfeat/XFeatFeatures.hpp>
 #include <okvis/xfeat/XFeatFrontend.hpp>
 #endif
@@ -185,13 +187,19 @@ Frontend::Frontend(size_t numCameras, std::string dBowVocDir)
 
 // ---- Mow-e XFeat frontend (ADR-0040) ---------------------------------------
 
-/// \brief Owns the per-camera XFeat TensorRT engines (PIMPL keeps TensorRT
-///        types out of Frontend.hpp; only populated in USE_MOWE_XFEAT builds).
+/// \brief Owns the per-camera XFeat TensorRT engines and the LighterGlue
+///        matcher (PIMPL keeps TensorRT types out of Frontend.hpp; only
+///        populated in USE_MOWE_XFEAT builds).
 struct Frontend::XFeatRuntime {
 #ifdef OKVIS_USE_MOWE_XFEAT
   /// One engine per camera: detectAndDescribe runs per-camera in parallel and
   /// a TensorRT execution context + stream pair is not thread-safe.
   std::vector<std::unique_ptr<xfeat::XFeatFrontend>> engines;
+  /// Pair matcher for stereo / motion stereo (stage B/C); null → cosine NN.
+  std::unique_ptr<xfeat::LighterGlueMatcher> lighterGlue;
+  /// One matcher context — serialise match() calls (defensive; the matching
+  /// stages run sequentially in dataAssociationAndInitialization today).
+  std::mutex lighterGlueMutex;
 #endif
 };
 
@@ -212,12 +220,29 @@ void Frontend::setXFeatParameters(const XFeatParameters& xfeat) {
                       "XFeat engine failed to load (TensorRT build + .plan "
                       "required): " << xfeat.engine)
   }
+  if (!xfeat.lighterglue_engine.empty()) {
+    xfeat::LighterGlueConfig lgCfg;
+    lgCfg.engine_path = xfeat.lighterglue_engine;
+    lgCfg.min_score = float(xfeat.match_score_min);
+    runtime->lighterGlue.reset(new xfeat::LighterGlueMatcher(lgCfg));
+    OKVIS_ASSERT_TRUE(Exception, runtime->lighterGlue->loaded(),
+                      "LighterGlue engine failed to load: "
+                          << xfeat.lighterglue_engine)
+  }
   std::uint32_t w = 0, h = 0;
   runtime->engines.front()->input_dims(w, h);
   xfeatRuntime_ = std::move(runtime);
   LOG(INFO) << "XFeat frontend enabled: " << xfeat.engine << " (" << w << "x"
             << h << "); matching_threshold " << briskMatchingThreshold_
             << " interpreted as cosine distance";
+  if (xfeatRuntime_->lighterGlue) {
+    LOG(INFO) << "LighterGlue pair matcher enabled: "
+              << xfeat.lighterglue_engine << " (capacity "
+              << xfeatRuntime_->lighterGlue->capacity() << ", min score "
+              << xfeat.match_score_min << ")";
+  } else {
+    LOG(INFO) << "LighterGlue not configured — cosine NN pair matching";
+  }
 #else
   OKVIS_THROW(Exception,
               "frontend_parameters: xfeat: use=true, but okvis was built "
@@ -297,6 +322,62 @@ bool Frontend::detectAndDescribeXFeat(
   (void)cameraIndex;
   (void)frameOut;
   OKVIS_THROW(Exception, "not built with USE_MOWE_XFEAT")
+  return false;
+#endif
+}
+
+bool Frontend::lighterGluePairProposals(const okvis::MultiFrame& frameA,
+                                        size_t imA,
+                                        const okvis::MultiFrame& frameB,
+                                        size_t imB,
+                                        std::vector<int>& matchBForA) {
+#ifdef OKVIS_USE_MOWE_XFEAT
+  if (!usingXFeat() || !xfeatRuntime_->lighterGlue) {
+    return false;
+  }
+  const size_t nA = frameA.numKeypoints(imA);
+  const size_t nB = frameB.numKeypoints(imB);
+  matchBForA.assign(nA, -1);
+  if (nA == 0 || nB == 0) {
+    return true;  // valid LighterGlue result: no possible matches
+  }
+
+  // Gather pixel coords; descriptors are already a contiguous [n x 64] float
+  // block (the CV_32F Mat built by detectAndDescribeXFeat).
+  std::vector<float> kptsA(nA * 2), kptsB(nB * 2);
+  Eigen::Vector2d pt;
+  for (size_t k = 0; k < nA; ++k) {
+    frameA.getKeypoint(imA, k, pt);
+    kptsA[k * 2] = float(pt[0]);
+    kptsA[k * 2 + 1] = float(pt[1]);
+  }
+  for (size_t k = 0; k < nB; ++k) {
+    frameB.getKeypoint(imB, k, pt);
+    kptsB[k * 2] = float(pt[0]);
+    kptsB[k * 2 + 1] = float(pt[1]);
+  }
+  const float* descA =
+      reinterpret_cast<const float*>(frameA.keypointDescriptor(imA, 0));
+  const float* descB =
+      reinterpret_cast<const float*>(frameB.keypointDescriptor(imB, 0));
+
+  std::lock_guard<std::mutex> lock(xfeatRuntime_->lighterGlueMutex);
+  const xfeat::PairMatches matches = xfeatRuntime_->lighterGlue->match(
+      kptsA.data(), descA, nA,
+      std::uint32_t(frameA.geometry(imA)->imageWidth()),
+      std::uint32_t(frameA.geometry(imA)->imageHeight()), kptsB.data(), descB,
+      nB, std::uint32_t(frameB.geometry(imB)->imageWidth()),
+      std::uint32_t(frameB.geometry(imB)->imageHeight()));
+  for (size_t m = 0; m < matches.size(); ++m) {
+    matchBForA[matches.indices[m].first] = int(matches.indices[m].second);
+  }
+  return true;
+#else
+  (void)frameA;
+  (void)imA;
+  (void)frameB;
+  (void)imB;
+  (void)matchBForA;
   return false;
 #endif
 }
@@ -2113,7 +2194,9 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
 
   kinematics::Transformation T_WS0;
   bool firstFrame = true;
+  size_t overlapRank = 0;  // matchFrameIds is sorted best-overlap-first
   for (auto olderFrameId : matchFrameIds) {
+    const size_t frameRank = overlapRank++;
     T_WS0 = estimator.pose(olderFrameId);
     for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
       const kinematics::Transformation T_SC0 = estimator.extrinsics(StateId(olderFrameId), im);
@@ -2145,6 +2228,23 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
       }
       desc1 = desc1(cv::Rect(0,0,int(descBytes),k1s.size()));
 
+      // LighterGlue proposals for the best-overlap frames (ADR-0040 stage C):
+      // the top motion_stereo_top_n of the overlap-sorted matchFrameIds use
+      // LighterGlue (one candidate per k0), the rest brute-force distance.
+      std::vector<int> lgMatch;  // k0 (older frame) -> k1 (current) or -1
+      std::vector<int> k1ToKk;   // original k1 -> compacted kk index or -1
+      bool lgMode = false;
+      if (frameRank < size_t(std::max(0, xfeatParams_.motion_stereo_top_n))) {
+        lgMode = lighterGluePairProposals(*multiFrame0, im, *multiFrame1, im,
+                                          lgMatch);
+      }
+      if (lgMode) {
+        k1ToKk.assign(k1Size, -1);
+        for (size_t kk = 0; kk < k1s.size(); ++kk) {
+          k1ToKk[k1s[kk]] = int(kk);
+        }
+      }
+
       AlignedVector<MatchInfo> matchInfos(k0Size);
 
       // vector container stores threads
@@ -2152,7 +2252,8 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
       for (size_t t = 0; t < size_t(params.frontend.num_matching_threads); t++) {
         workers.push_back(std::thread([this, t, k0Size, im, &multiFrame0, &estimator, f0, k1s,
                                       &T_WC0, &T_WC1, &multiFrame1, &olderFrameId, &matchInfos,
-                                       &params, &camera, desc1, descBytes]() {
+                                       &params, &camera, desc1, descBytes,
+                                       lgMode, &lgMatch, &k1ToKk]() {
           for(size_t k0 = t; k0 < k0Size; k0 += size_t(params.frontend.num_matching_threads)) {
             uint64_t id0 = multiFrame0->landmarkId(im, k0);
             if(id0) {
@@ -2185,9 +2286,21 @@ int Frontend::matchMotionStereo(Estimator& estimator, const ViParameters &params
               continue; // already matched
             }
 
-            for(size_t kk = 0; kk < k1s.size(); ++kk) {
+            size_t kkFrom = 0, kkTo = k1s.size();
+            if (lgMode) {
+              const int k1p = lgMatch[k0];
+              if (k1p < 0 || k1ToKk[size_t(k1p)] < 0) {
+                continue;  // no proposal, or proposed k1 already matched
+              }
+              kkFrom = size_t(k1ToKk[size_t(k1p)]);
+              kkTo = kkFrom + 1;
+            }
+            for(size_t kk = kkFrom; kk < kkTo; ++kk) {
               const size_t k1 = k1s[kk];
-              const double dist = descriptorDist(d0, desc1.data+kk*descBytes);
+              // LighterGlue-proposed pair: distance 0 accepts, still subject
+              // to the triangulation checks below.
+              const double dist =
+                  lgMode ? 0.0 : descriptorDist(d0, desc1.data+kk*descBytes);
               if(dist < distances) {
                 // it's a match!
 
@@ -2354,6 +2467,12 @@ void Frontend::matchStereo(Estimator &estimator, std::shared_ptr<okvis::MultiFra
         const auto camera1 = multiFrame->geometryAs<CAMERA_GEOMETRY>(im1);
         const double f0 = 0.5* (camera0->focalLengthU() + camera0->focalLengthV());
         const double f1 = 0.5* (camera1->focalLengthU() + camera1->focalLengthV());
+        // LighterGlue stereo proposals (ADR-0040 stage B): one candidate k1
+        // per k0; the triangulation validation below is unchanged. When not
+        // available, the brute-force descriptor loop runs as before.
+        std::vector<int> lgMatch;
+        const bool lgMode =
+            lighterGluePairProposals(*multiFrame, im0, *multiFrame, im1, lgMatch);
         for(size_t k0 = 0; k0 < k0Size; ++k0) {
 
           double distances = briskMatchingThreshold_;
@@ -2361,8 +2480,18 @@ void Frontend::matchStereo(Estimator &estimator, std::shared_ptr<okvis::MultiFra
           Eigen::Vector4d hps_W;
           size_t k1_match = 0;
 
-          for(size_t k1 = 0; k1 < k1Size; ++k1) {
-            const double dist = descriptorDist(
+          size_t k1From = 0, k1To = k1Size;
+          if (lgMode) {
+            if (lgMatch[k0] < 0) {
+              continue;  // LighterGlue proposes nothing for this keypoint
+            }
+            k1From = size_t(lgMatch[k0]);
+            k1To = k1From + 1;
+          }
+          for(size_t k1 = k1From; k1 < k1To; ++k1) {
+            // LighterGlue already decided the correspondence: distance 0
+            // accepts it, still subject to the triangulation checks below.
+            const double dist = lgMode ? 0.0 : descriptorDist(
                 multiFrame->keypointDescriptor(im0, k0),
                   multiFrame->keypointDescriptor(im1, k1));
             if(dist < distances) {

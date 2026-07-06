@@ -22,7 +22,8 @@ find_package(mowe_camera_core CONFIG REQUIRED)
 
 add_library(okvis_xfeat_frontend
   src/XFeatFrontend.cpp
-  src/TensorRTEngine.cpp)
+  src/TensorRTEngine.cpp
+  src/LighterGlueMatcher.cpp)
 add_library(okvis::XFeatFrontend ALIAS okvis_xfeat_frontend)
 
 target_include_directories(okvis_xfeat_frontend
