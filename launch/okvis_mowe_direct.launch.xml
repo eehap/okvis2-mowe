@@ -1,0 +1,46 @@
+<launch>
+    <!-- =====================================================================
+         Mow-e bench VIO, DIRECT camera ingest (ADR-0040 §2).
+
+         okvis_node_mowe owns the OV9281 stereo pair via mowe_camera_core:
+         both eyes arrive as ONE hardware-synchronized FrameBundle (single
+         V4L2 frame, single CLOCK_MONOTONIC SOF stamp), fed straight into
+         ThreadedSlam::addImages. No image topics, no DDS on the hot path, no
+         camera lifecycle-activation trap, and the stereo pair can never
+         split or half-drop (the failure modes of okvis_mowe_ov9281.launch.xml).
+
+         Only the IMU rides ROS: the sch16t LifecycleNode is included here and
+         okvis_node_mowe drives its configure->activate transitions itself at
+         startup (the launch-side auto-activate helpers are unreliable).
+         ===================================================================== -->
+
+    <arg name="config_filename"
+         default="$(find-pkg-share okvis)/config/ov9281_sch16t_xfeat.yaml"/>
+    <arg name="imu_config"
+         default="$(find-pkg-share sch16t_imu_node)/config/sch16t_default.yaml"/>
+    <arg name="camera_device" default="/dev/video1"/>
+    <arg name="camera_fps"    default="50.0"/>
+    <arg name="rviz"          default="true"/>
+    <arg name="imu"           default="true"/>  <!-- false: feed IMU from a rosbag -->
+
+    <!-- SCH16T IMU node (lifecycle; activated by okvis_node_mowe) -->
+    <include file="$(find-pkg-share sch16t_imu_node)/launch/sch16t.launch.xml"
+             if="$(var imu)">
+        <arg name="config_file" value="$(var imu_config)"/>
+    </include>
+
+    <!-- OKVIS2 estimator with direct camera ingest -->
+    <node pkg="okvis" exec="okvis_node_mowe" name="okvis" namespace="okvis">
+        <!-- >0.0 publishes IMU-propagated live state between keyframes -->
+        <param name="imu_propagated_state_publishing_rate" value="200.0"/>
+        <param name="config_filename" value="$(var config_filename)"/>
+        <param name="camera_device" value="$(var camera_device)"/>
+        <param name="camera_fps" value="$(var camera_fps)"/>
+        <param name="activate_lifecycle_node" value="/sch16t_imu_node"/>
+        <remap from="/okvis/imu0" to="/imu/data_raw"/>
+    </node>
+
+    <node pkg="rviz2" exec="rviz2" name="rviz2" namespace="okvis"
+          args="-d $(find-pkg-share okvis)/config/rviz2/rviz2_config.rviz"
+          if="$(var rviz)"/>
+</launch>

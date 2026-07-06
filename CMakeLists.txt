@@ -347,11 +347,33 @@ if(BUILD_ROS2)
     okvis::Ros2
     ${OpenCV_LIBS}
     ${SUITESPARSE_LIBRARIES}
-    ${Boost_LIBRARIES} 
+    ${Boost_LIBRARIES}
     ${PCL_LIBRARIES}
   )
   INSTALL(TARGETS okvis_node_subscriber DESTINATION lib/${PROJECT_NAME})
-  
+
+  if(USE_MOWE_XFEAT)
+    # Mow-e direct-ingest VIO node (ADR-0040 §2): owns the OV9281 stereo pair
+    # via mowe_camera_core (one hardware-synced FrameBundle, no ROS/DDS on the
+    # image path); IMU in over ROS, pose out via okvis::Publisher. Needs the
+    # mowe_camera_core package — gated on USE_MOWE_XFEAT, which implies it.
+    FIND_PACKAGE(lifecycle_msgs REQUIRED)
+    find_package(mowe_camera_core CONFIG REQUIRED)
+    ADD_EXECUTABLE(okvis_node_mowe okvis_ros2/src/okvis_node_mowe.cpp)
+    TARGET_LINK_LIBRARIES(
+      okvis_node_mowe
+      okvis::Ros2
+      mowe_camera::core
+      ${OpenCV_LIBS}
+      ${SUITESPARSE_LIBRARIES}
+      ${Boost_LIBRARIES}
+      ${PCL_LIBRARIES}
+    )
+    AMENT_TARGET_DEPENDENCIES(okvis_node_mowe rclcpp sensor_msgs lifecycle_msgs)
+    INSTALL(TARGETS okvis_node_mowe DESTINATION lib/${PROJECT_NAME})
+  endif()
+
+
   if(HAVE_LIBREALSENSE)
     ADD_EXECUTABLE(okvis_node_realsense okvis_ros2/src/okvis_node_realsense.cpp)
     TARGET_LINK_LIBRARIES(
