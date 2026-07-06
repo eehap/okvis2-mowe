@@ -20,6 +20,9 @@
          default="$(find-pkg-share sch16t_imu_node)/config/sch16t_default.yaml"/>
     <arg name="camera_device" default="/dev/video1"/>
     <arg name="camera_fps"    default="50.0"/>
+    <!-- Feed every Nth frame to the estimator (sensor mode stays at 50 fps).
+         2 -> 25 Hz: still plenty for VIO, halves the realtime frame drops. -->
+    <arg name="camera_decimation" default="2"/>
     <arg name="rviz"          default="true"/>
     <arg name="imu"           default="true"/>  <!-- false: feed IMU from a rosbag -->
 
@@ -36,6 +39,7 @@
         <param name="config_filename" value="$(var config_filename)"/>
         <param name="camera_device" value="$(var camera_device)"/>
         <param name="camera_fps" value="$(var camera_fps)"/>
+        <param name="camera_decimation" value="$(var camera_decimation)"/>
         <param name="activate_lifecycle_node" value="/sch16t_imu_node"/>
         <remap from="/okvis/imu0" to="/imu/data_raw"/>
     </node>

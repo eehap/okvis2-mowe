@@ -92,6 +92,7 @@ int main(int argc, char **argv) {
   node->declare_parameter("camera_type", "arducam_ov9281");
   node->declare_parameter("camera_device", "/dev/video1");
   node->declare_parameter("camera_fps", 50.0);
+  node->declare_parameter("camera_decimation", 1);
   node->declare_parameter("activate_lifecycle_node", "/sch16t_imu_node");
 
   std::string configFilename;
@@ -192,11 +193,18 @@ int main(int argc, char **argv) {
     shtdown = false;
     signal(SIGINT, [](int) { shtdown = true; });
 
+    int decimation = 1;
+    node->get_parameter("camera_decimation", decimation);
+    if (decimation > 1) {
+      LOG(INFO) << "feeding every " << decimation << ". frame to the estimator ("
+                << fps / decimation << " Hz nominal)";
+    }
+
     // Capture thread: FrameBundle -> addImages. Planes are cloned: the
     // bundle's V4L2 buffer requeues when it goes out of scope, while the
     // estimator queue outlives it. (The GPU zero-copy path — NvBufSurface
     // straight into the XFeat engine — is a follow-up; ADR-0040 §3.)
-    std::thread captureThread([&camera, &estimator]() {
+    std::thread captureThread([&camera, &estimator, decimation]() {
       long timeouts = 0;
       while (!shtdown) {
         mowe::camera::FrameBundle bundle;
@@ -205,6 +213,13 @@ int main(int argc, char **argv) {
           if (++timeouts % 25 == 0) {
             LOG(WARNING) << "camera capture timeouts: " << timeouts;
           }
+          continue;
+        }
+        // Sensor-rate decimation: the OV9281 mode runs at 50 fps, more than
+        // the Orin Nano VIO pipeline sustains — skip early instead of paying
+        // clone+queue for frames ThreadedSlam would drop anyway (sequence-
+        // based, so the kept cadence is stable).
+        if (decimation > 1 && (bundle.sequence() % decimation) != 0) {
           continue;
         }
         const auto planes = bundle.planes();
