@@ -1,0 +1,2 @@
+# Frozen pre-ADR-0042 fork — superseded by okvis2x-mowe.
+# Both declare ROS package "okvis"; only one may be on a colcon path.

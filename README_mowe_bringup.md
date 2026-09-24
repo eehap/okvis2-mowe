@@ -1,3 +1,9 @@
+> **FROZEN (2026-09-25, ADR-0042).** This fork of okvis2 `a2ea006` is superseded by
+> [`okvis2x-mowe`](https://github.com/eehap/okvis2x-mowe) (OKVIS2-X `38043e4` + `feat/mowe-port`),
+> which is the single state estimator for Mow-e. Nothing here is built or deployed any more:
+> the checkout carries a `COLCON_IGNORE` because both forks declare the ROS package `okvis`
+> and must never share a colcon workspace. Kept read-only as the BRISK-baseline reference.
+
 # OKVIS2 bring-up on the Mow-e bench rig (OV9281 stereo + SCH16T IMU)
 
 Stand up **visual-inertial odometry** on the bench using stock OKVIS2 fed by the
